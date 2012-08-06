@@ -21,7 +21,7 @@ if (typeof exports !== undefined + '') {
 	window.L = L;
 }
 
-L.version = '0.4.2';
+L.version = '0.4.2sgj';
 
 
 /*
@@ -42,6 +42,14 @@ L.Util = {
 		return dest;
 	},
 
+	// Create an object based on an existing object (effectively make methods and props accessible. Properties can not be modified on the original object) copied from Spine.js
+	clone: Object.create || function (o) { // (object) -> object
+		var Func;
+		Func = function () {};
+		Func.prototype = o;
+		return new Func();
+	},
+
 	bind: function (fn, obj) { // (Function, Object) -> Function
 		var args = arguments.length > 2 ? Array.prototype.slice.call(arguments, 2) : null;
 		return function () {
@@ -51,8 +59,10 @@ L.Util = {
 
 	stamp: (function () {
 		var lastId = 0, key = '_leaflet_id';
-		return function (/*Object*/ obj) {
-			obj[key] = obj[key] || ++lastId;
+		return function (/*Object*/ obj, forceId) {
+			/*jshint eqeqeq: false, eqnull: true */
+			obj[key] = forceId != null ? forceId : // assign an id when forceId not null or undefined
+				obj[key] != null ? obj[key] : ++lastId; // allow 0 as a key as well (but not null or undefined)
 			return obj[key];
 		};
 	}()),
@@ -2236,10 +2246,12 @@ L.TileLayer = L.Class.extend({
 		// get unused tile - or create a new tile
 		var tile = this._getTile();
 
-		// Chrome 20 layouts much faster with top/left (Verify with timeline, frames), Safari 5.1.7, iOS 5.1.1,
-		// android browser (4.0) have display issues with top/left and requires transform instead
+		// Chrome 20 layouts much faster with top/left (Verify with timeline, frames)
+		// android 4 browser has display issues with top/left and requires transform instead
+		// android 3 browser not tested
+		// android 2 browser requires top/left or tiles disappear on load or first drag (reappear after zoom) https://github.com/CloudMade/Leaflet/issues/866
 		// (other browsers don't currently care) - see debug/hacks/jitter.html for an example
-		L.DomUtil.setPosition(tile, tilePos, L.Browser.chrome);
+		L.DomUtil.setPosition(tile, tilePos, L.Browser.chrome || L.Browser.android23);
 
 		this._tiles[tilePoint.x + ':' + tilePoint.y] = tile;
 
@@ -5037,51 +5049,82 @@ L.Circle.include(!L.Path.CANVAS ? {} : {
 });
 
 
-L.GeoJSON = L.FeatureGroup.extend({
-	initialize: function (geojson, options) {
-		L.Util.setOptions(this, options);
-
-		this._layers = {};
-
-		if (geojson) {
-			this.addData(geojson);
+(function () {
+	var FeatureLayer = {
+		_properties: null,
+		getProperties: function () {
+			return this._properties ? this._properties : null;
+		},
+		getId: function () {
+			return L.Util.stamp(this);
+		},
+		_injectProps: function (properties) {
+			this._properties = properties instanceof Object ? L.Util.clone(properties) : null;
 		}
-	},
+	};
+	L.GeoJSON = L.FeatureGroup.extend({
+		initialize: function (geojson, options) {
+			L.Util.setOptions(this, options);
 
-	addData: function (geojson) {
-		var features = geojson instanceof Array ? geojson : geojson.features,
-		    i, len;
+			this._layers = {};
 
-		if (features) {
-			for (i = 0, len = features.length; i < len; i++) {
-				this.addData(features[i]);
+			if (geojson) {
+				this.addData(geojson);
 			}
-			return this;
-		}
+		},
 
-		var options = this.options,
-		    style = options.style;
+		getLayerById: function (id) {
+			var ret = this._layers[id];
+			return ret !== undefined ? ret : null;
+		},
 
-		if (options.filter && !options.filter(geojson)) { return; }
+		addData: function (geojson) {
+			var features = geojson instanceof Array ? geojson : geojson.type === "FeatureCollection" && geojson.features,
+				  i, len;
 
-		var layer = L.GeoJSON.geometryToLayer(geojson, options.pointToLayer);
-
-		if (style) {
-			if (typeof style === 'function') {
-				style = style(geojson);
+			if (features) {
+				for (i = 0, len = features.length; i < len; i++) {
+					this.addData(features[i]);
+				}
+				return this;
 			}
-			if (layer.setStyle) {
-				layer.setStyle(style);
+
+			var options = this.options,
+				  style = options.style;
+
+			if (options.filter && !options.filter(geojson)) { return; }
+
+			var layer = L.GeoJSON.geometryToLayer(geojson, options.pointToLayer);
+
+			L.Util.extend(layer, FeatureLayer);
+
+			if (style) {
+				if (typeof style === 'function') {
+					style = style(geojson);
+				}
+				if (layer.setStyle) {
+					layer.setStyle(style);
+				}
 			}
-		}
+		
+			if (geojson.type === 'Feature') {
+				i = options.preserveId && undefined !== geojson.id ? geojson.id : undefined;
+				// if id is contained in feature and we should keep it, stamp it forced or else stamp as usual
+				L.Util.stamp(layer, i);
 
-		if (options.onEachFeature) {
-			options.onEachFeature(geojson, layer);
-		}
+				if (options.storeProps) {
+					layer._injectProps(geojson.properties);
+				}
 
-		return this.addLayer(layer);
-	}
-});
+				if (options.onEachFeature) {
+					options.onEachFeature(geojson, layer);
+				}
+			}
+
+			return this.addLayer(layer);
+		}
+	});
+}());
 
 L.Util.extend(L.GeoJSON, {
 	geometryToLayer: function (geojson, pointToLayer) {
@@ -5158,6 +5201,7 @@ L.Util.extend(L.GeoJSON, {
 L.geoJson = function (geojson, options) {
 	return new L.GeoJSON(geojson, options);
 };
+
 
 /*
  * L.DomEvent contains functions for working with DOM events.
